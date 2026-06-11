@@ -1,0 +1,6 @@
+# .syncignore 示例
+node_modules/
+*.log
+temp/
+*.tmp
+.DS_Store

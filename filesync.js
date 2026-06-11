@@ -294,8 +294,8 @@ function chunkFile(filePath, chunkSize = CHUNK_SIZE) {
   try {
     while (offset < stat.size) {
       const bytesRead = fs.readSync(fd, buf, 0, chunkSize, offset);
-      const data = buf.slice(0, bytesRead);
-      chunks.push({ offset, size: bytesRead, hash: md5(data), data });
+      const data = Buffer.from(buf.buffer, buf.byteOffset, bytesRead);
+      chunks.push({ offset, size: bytesRead, hash: md5(data), data: Buffer.from(data) });
       offset += bytesRead;
     }
   } finally { fs.closeSync(fd); }
@@ -359,7 +359,7 @@ function rsyncCopy(srcPath, dstPath, progress) {
   fs.writeFileSync(dstPath, result);
   const ctime = new Date(srcStat.mtime);
   fs.utimesSync(dstPath, ctime, ctime);
-  if (progress) progress.addBytes(srcStat.size);
+  if (progress) progress.addBytes(transferred);
 
   return { totalSize: srcStat.size, transferred, reused, method: 'rsync' };
 }
@@ -498,7 +498,11 @@ function executeSync(ctx) {
     const to = path.join(rightDir, f.relPath);
     const info = { type: 'add', relPath: f.relPath, from, to, size: f.size, backup: null };
     if (!dryRun) {
-      rsyncCopy(from, to, progress);
+      const result = rsyncCopy(from, to, progress);
+      if (result.method === 'rsync' && result.reused > 0) {
+        totalBytes -= result.reused;
+        progress.setTotalBytes(totalBytes);
+      }
     } else {
       progress.addBytes(f.size);
     }
@@ -513,7 +517,11 @@ function executeSync(ctx) {
     const info = { type: 'modify', relPath: f.relPath, from, to, size: s.size, backup: null };
     if (!dryRun) {
       info.backup = backupFile(to, f.relPath);
-      rsyncCopy(from, to, progress);
+      const result = rsyncCopy(from, to, progress);
+      if (result.method === 'rsync' && result.reused > 0) {
+        totalBytes -= result.reused;
+        progress.setTotalBytes(totalBytes);
+      }
     } else {
       progress.addBytes(s.size);
     }
