@@ -12,7 +12,7 @@ const APP_DIR = path.join(process.cwd(), '.filesync');
 const LOG_DIR = path.join(APP_DIR, 'logs');
 const BACKUP_DIR = path.join(APP_DIR, 'backups');
 const PROFILE_FILE = path.join(APP_DIR, 'profiles.json');
-const CHUNK_SIZE = 64 * 1024; // 64KB 块
+const CHUNK_SIZE = 4 * 1024; // 4KB 块（小文件也能触发增量复用）
 const MODES = ['mirror', 'push', 'pull'];
 
 ensureDir(APP_DIR);
@@ -270,14 +270,17 @@ class ProgressBar {
     const w = 30;
     const filled = Math.round((pct / 100) * w);
     const bar = '█'.repeat(filled) + '░'.repeat(w - filled);
-    const bPct = this.totalBytes ? ((this.bytes / this.totalBytes) * 100).toFixed(1) : 0;
+    const denom = Math.max(this.totalBytes, this.bytes);
+    const bPct = denom > 0 ? ((this.bytes / denom) * 100).toFixed(1) : 0;
+    const dispTotal = denom > 0 ? formatBytes(denom) : '?';
     const elapsed = (now - this.start) / 1000;
     const rate = elapsed > 0 ? this.bytes / elapsed : 0;
-    const eta = rate > 0 && this.totalBytes ? ((this.totalBytes - this.bytes) / rate) : 0;
-    const line = `\r${this.label} ${this.current}/${this.total} [${bar}] ${pct.toFixed(1)}%  ${formatBytes(this.bytes)}/${this.totalBytes ? formatBytes(this.totalBytes) : '?'} (${bPct}%)  ${formatBytes(rate)}/s  ETA: ${eta.toFixed(0)}s`;
+    const eta = rate > 0 && this.totalBytes > this.bytes ? ((this.totalBytes - this.bytes) / rate) : 0;
+    const line = `\r${this.label} ${this.current}/${this.total} [${bar}] ${pct.toFixed(1)}%  ${formatBytes(this.bytes)}/${dispTotal} (${bPct}%)  ${formatBytes(rate)}/s  ETA: ${eta.toFixed(0)}s`;
     process.stderr.write(line.padEnd(120, ' '));
   }
   done() {
+    this.totalBytes = this.bytes;
     this.render();
     process.stderr.write('\n');
   }
@@ -481,13 +484,44 @@ function printDiffSummary(diff) {
   return total;
 }
 
+function estimateTransferredBytes(srcPath, dstPath) {
+  if (!fs.existsSync(dstPath)) {
+    return fs.existsSync(srcPath) ? fs.statSync(srcPath).size : 0;
+  }
+  const srcStat = fs.statSync(srcPath);
+  if (srcStat.size === 0) return 0;
+  const tgtChunks = chunkFile(dstPath, CHUNK_SIZE);
+  const tgtHashMap = new Map();
+  tgtChunks.forEach((c, idx) => tgtHashMap.set(c.hash, idx));
+  const srcChunks = chunkFile(srcPath, CHUNK_SIZE);
+  let transferred = 0;
+  for (const srcChunk of srcChunks) {
+    if (tgtHashMap.has(srcChunk.hash)) {
+      const tgtIdx = tgtHashMap.get(srcChunk.hash);
+      const tgtChunk = tgtChunks[tgtIdx];
+      if (tgtChunk.size === srcChunk.size) continue;
+    }
+    transferred += srcChunk.size;
+  }
+  return transferred;
+}
+
 function executeSync(ctx) {
   const { source, target, mode, dryRun, diff, leftDir, rightDir, direction } = ctx;
   const actions = [];
   let totalBytes = 0;
 
   diff.added.forEach(f => totalBytes += f.size);
-  diff.modified.forEach(f => totalBytes += (f.source ? f.source.size : f.size));
+  if (dryRun) {
+    diff.modified.forEach(f => totalBytes += (f.source ? f.source.size : f.size));
+  } else {
+    diff.modified.forEach(f => {
+      const s = f.source || f;
+      const from = path.join(leftDir, f.relPath);
+      const to = path.join(rightDir, f.relPath);
+      totalBytes += estimateTransferredBytes(from, to);
+    });
+  }
 
   const totalOps = diff.added.length + diff.modified.length + diff.deleted.length;
   const progress = new ProgressBar(totalOps, dryRun ? '[DRY-RUN]' : '[同步]');
@@ -498,11 +532,7 @@ function executeSync(ctx) {
     const to = path.join(rightDir, f.relPath);
     const info = { type: 'add', relPath: f.relPath, from, to, size: f.size, backup: null };
     if (!dryRun) {
-      const result = rsyncCopy(from, to, progress);
-      if (result.method === 'rsync' && result.reused > 0) {
-        totalBytes -= result.reused;
-        progress.setTotalBytes(totalBytes);
-      }
+      rsyncCopy(from, to, progress);
     } else {
       progress.addBytes(f.size);
     }
@@ -517,11 +547,7 @@ function executeSync(ctx) {
     const info = { type: 'modify', relPath: f.relPath, from, to, size: s.size, backup: null };
     if (!dryRun) {
       info.backup = backupFile(to, f.relPath);
-      const result = rsyncCopy(from, to, progress);
-      if (result.method === 'rsync' && result.reused > 0) {
-        totalBytes -= result.reused;
-        progress.setTotalBytes(totalBytes);
-      }
+      rsyncCopy(from, to, progress);
     } else {
       progress.addBytes(s.size);
     }

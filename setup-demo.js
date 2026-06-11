@@ -29,9 +29,17 @@ function reset() {
   fs.writeFileSync(path.join(srcDir, '.syncignore'),
     '# .syncignore 示例\nnode_modules/\n*.log\ntemp/\n*.tmp\n.DS_Store\n');
 
-  let src = '较大的文件内容用于测试增量传输。\n';
+  console.log('创建大文件（含可复用块，用于测试增量传输）...');
+  let src = '文件头 - 源版本\n';
+  const blockSize = 4096;
+  for (let b = 0; b < 4; b++) {
+    let block = '';
+    for (let i = 0; i < blockSize; i++) block += String.fromCharCode(65 + b);
+    src += block + '\n';
+  }
+  src += '源文件独有内容（变化块）\n';
   for (let i = 1; i <= 500; i++)
-    src += '行' + i + ': 这是用于测试块级增量同步的内容数据行 ' + i + '\n';
+    src += '行' + i + ': 这是源新增的尾部内容数据行 ' + i + '\n';
   fs.writeFileSync(path.join(srcDir, 'bigfile.txt'), src);
 
   console.log('创建目标目录文件（有差异）...');
@@ -40,9 +48,15 @@ function reset() {
   fs.writeFileSync(path.join(tgtDir, 'fileE.txt'), '目标目录独有文件E\n只在目标目录中存在\n');
   fs.writeFileSync(path.join(tgtDir, 'subdir', 'fileD.txt'), '子目录文件D - 旧目标\n旧的子目录内容\n');
 
-  let tgt = '较早的大文件内容。\n';
-  for (let i = 1; i <= 400; i++)
-    tgt += '行' + i + ': 这是旧内容数据行 ' + i + '\n';
+  let tgt = '文件头 - 旧版本\n';
+  for (let b = 0; b < 4; b++) {
+    let block = '';
+    for (let i = 0; i < blockSize; i++) block += String.fromCharCode(65 + b);
+    tgt += block + '\n';
+  }
+  tgt += '目标文件旧尾部\n';
+  for (let i = 1; i <= 200; i++)
+    tgt += '行' + i + ': 这是目标旧尾部数据行 ' + i + '\n';
   fs.writeFileSync(path.join(tgtDir, 'bigfile.txt'), tgt);
 
   const oldTime = new Date('2024-01-01T12:00:00');
